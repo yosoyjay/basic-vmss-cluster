@@ -32,20 +32,20 @@ The allocated VMs can use the example `cloud-init.yaml` file to prepare the VMs 
 
 ## Scripts for cluster management
 
-1. Script to update the hostfiles if VMs change (`update-hosts.sh`)
-2. Script to run NCCCL tests (`run-nccl-test.sh`)
-2. Script to aggregate files from nodes across the cluster all nodes (`gather-host-info.sh`)
+- Script to update the hostfiles if VMs change (`update-hosts.sh`)
+- Script to run NCCCL tests (`run-nccl-test.sh`)
+- Script to aggregate files from nodes across the cluster all nodes (`gather-host-info.sh`)
 
 ## Provisioning steps
 
-- 1. Create a `cluster-config.env` from `example-config.env`
-- 2. Use `cluster-config.env` as the argument to `provision-cluster.sh`, i.e. `provision-cluster.sh cluster-config.env`
-- 3. Log into the headnode using the public ip `ssh user@headnode-public-ip`
+1. Create a `cluster-config.env` from `example-config.env`
+2. Use `cluster-config.env` as the argument to `provision-cluster.sh`, i.e. `provision-cluster.sh cluster-config.env`
+3. Log into the headnode using the public ip `ssh user@headnode-public-ip`
     - SSH is also available through public load balancer `ssh -p 50000 user@lb-public-ip`, but we assume connections will go through headnode NIC.
-- 4. Check node health across cluster after all VMs have successfully provisioned, from headnode:
+4. Check node health across cluster after all VMs have successfully provisioned, from headnode:
     - e.g. `bash /opt/gather-file.sh hostfile /var/log/node-health.log.status cluster-health.status`
     - Review cluster-health.status for unhealthy nodes and remediate, if necessary
-- 5. Run NCCL all-reduce benchmark from headnode `run-nccl-test.sh hostfile`
+5. Run NCCL all-reduce benchmark from headnode `run-nccl-test.sh hostfile`
 
 ## Assumptions
 
