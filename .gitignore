@@ -1,0 +1,39 @@
+# Ignore my files
+cluster-config.en
+hostfile
+hostfile-ip
+
+# Ignore all .env files
+.env
+.env.*
+
+# Ignore logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Ignore compiled binaries and core dumps
+*.out
+*.o
+*.so
+*.a
+*.core
+
+# Ignore MacOS and Linux system files
+.DS_Store
+Thumbs.db
+._*
+.trash
+.nfs*
+
+# Ignore user-specific shell history and config files
+.history
+.bash_history
+.zsh_history
+
+# Ignore editor and IDE files
+.vscode/
+.idea/
+*.code-workspace

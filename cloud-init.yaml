@@ -1,0 +1,238 @@
+#cloud-config
+package_update: true
+packages:
+  - tree
+  - ncdu
+  - tmux
+  - nload
+  - inotify-tools
+write_files:
+  # Setup NVMe disks as RAID-0
+  - path: /opt/setup_nvme.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      NVME_DISKS_NAME=$(ls /dev/nvme*n1)
+      NVME_DISKS=$(ls -latr /dev/nvme*n1 | wc -l)
+
+      echo "Number of NVMe Disks: $NVME_DISKS"
+
+      if [ "$NVME_DISKS" == "0" ]
+      then
+          exit 0
+      else
+          mkdir -p /mnt/resource_nvme
+          # Needed incase something did not unmount as expected. This will delete any data that may be left behind
+          mdadm --stop /dev/md*
+          mdadm --create /dev/md128 -f --run --level 0 --raid-devices $NVME_DISKS $NVME_DISKS_NAME
+          mkfs.xfs -f /dev/md128
+          mount /dev/md128 /mnt/resource_nvme
+      fi
+
+      chmod 1777 /mnt/resource_nvme
+  # Use RAID-0 for Hugging Face cache
+  - path: /etc/profile.d/hf_home.sh
+    permissions: '0755'
+    content: |
+      export HF_HOME=/mnt/resource_nvme/hf_cache
+   # Use RAID-0 for Docker
+  - path: /etc/docker/daemon.json
+    permissions: '0644'
+    content: |
+      {
+        "data-root": "/mnt/resource_nvme/docker"
+      }
+  # Add script to output important node information and save to /var/log/node-info.log
+  # - Includes hostname, physical hostname, and private IP address
+  - path: /opt/node-info.sh
+    permissions: '0755'
+    content : |
+      #!/bin/bash
+      # Save the hostname, physical hostname, and private IP address to a file for easy access
+      set -eo pipefail
+
+      # Get the physical hostname
+      phn=$(tr -s '\000' ' ' < /var/lib/hyperv/.kvp_pool_3 | awk '{ print $2 }')
+
+      # Get the private IP address
+      ip=$(ip a show eth0 | grep 'global eth0' | awk '{ print $2 }' | awk -F'/' '{ print $1 }')
+
+      # Save hostname, physical hostname, and private IP address to a file
+      echo "$(hostname) ${ip} ${phn}" >> /var/log/node-info.log
+  # Add script to run AzNHC health checks and save to /var/log/aznhc-health.log
+  - path: /opt/run-aznhc.sh
+    permissions: '0755'
+    content : |
+      #!/bin/bash
+      # Runs AzNHC health checks and saves the output to /var/log/aznhc-health.log
+      # Results of test are saved to /var/log/aznhc-health.log.status as "passed" or "failed"
+      # Runs check-node-health.sh after each run to update node health status
+      set -o pipefail
+
+      AZNHC_LOG=/var/log/aznhc-health.log
+      AZNHC_STATUS=/var/log/aznhc-health.log.status
+
+      # Check if the aznhc container is already running
+      if [ "$(docker ps -q -f name=aznhc-nv)" ]; then
+          echo "Container aznhc is already running. Exiting."
+          exit 0
+      fi
+
+      # Check if the aznhc container exists
+      if [ "$(docker ps -aq -f status=exited -f name=aznhc-nv)" ]; then
+          # Cleanup
+          docker rm aznhc-nv
+      fi
+
+      # Get the latest code from repo
+      if [[ ! -d /mnt/resource_nvme/azurehpc-health-checks ]]; then
+        git clone https://github.com/Azure/azurehpc-health-checks.git /mnt/resource_nvme/azurehpc-health-checks
+      fi
+
+      # Hacks if they haven't fixed main yet
+      sed -i 's/--runtime=nvidia/--gpus all/g' /mnt/resource_nvme/azurehpc-health-checks/run-health-checks.sh
+      echo "exit $?" >> /mnt/resource_nvme/azurehpc-health-checks/run-health-checks.sh
+
+      # Run the health checks
+      /mnt/resource_nvme/azurehpc-health-checks/run-health-checks.sh -o /var/log/aznhc-health.log -a
+      result=$?
+      if [ $result -ne 0 ]; then
+          echo "Health checks failed with exit code $result" >> $AZNHC_LOG
+          echo "$(date '+%Y-%m-%dT%H:%M:%S') failed" >> $AZNHC_STATUS
+      else
+          echo "Health checks passed" >> $AZNHC_LOG
+          echo "$(date '+%Y-%m-%dT%H:%M:%S') passed" >> $AZNHC_STATUS
+      fi
+
+      # Ensure the aznhc container is stopped after running
+      if [ "$(docker ps -q -f name=aznhc-nv)" ]; then
+          # Stop the container
+          docker stop aznhc-nv
+      fi
+      # Ensure the aznhc container is removed after running
+      if [ "$(docker ps -aq -f status=exited -f name=aznhc-nv)" ]; then
+          # Cleanup
+          docker rm aznhc-nv
+      fi
+
+      # Update node health status
+      /opt/check-node-health.sh
+
+  # Add script to run dcgmi diag command and save to /var/log/dcgmi-diag.log
+  - path: /opt/run-dcgmi-diag.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Runs dcgmi diag command and saves the output to /var/log/dcgmi-diag.log
+      # Results of test are saved to /var/log/dcgmi-diag.log.status as "passed" or "failed"
+      # Runs check-node-health.sh after each run to update node health status
+      set -o pipefail
+
+      # Check if run level requested
+      if [ "$#" -eq 0 ]; then
+        runlevel=2
+      else
+        runlevel=$1
+      fi
+
+      dcgmi diag -r $runlevel -v | tee -a /var/log/dcgmi-diag.log
+      result=$?
+      if [ $result -ne 0 ]; then
+          echo "dcgmi diag failed with exit code $result" >> /var/log/dcgmi-diag.log
+          echo "$(date '+%Y-%m-%dT%H:%M:%S') failed" >> /var/log/dcgmi-diag.log.status
+      else
+          echo "dcgmi diag passed" >> /var/log/dcgmi-diag.log
+          echo "$(date '+%Y-%m-%dT%H:%M:%S') passed" >> /var/log/dcgmi-diag.log.status
+      fi
+
+      # Update node health status
+      /opt/check-node-health.sh
+  # Checks the status of aznhc and dcgmi log files and updates node health status
+  - path: /opt/check-node-health.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Derives health of the node from aznhc and dcgmi log files
+      # Logs are saved to /var/log/node-health.log
+      # Health status saved to /var/log/node-health.log.status as "healthy" or "unhealthy"
+      set -eo pipefail
+
+      # Log file paths
+      AZNHC_LOG="/var/log/aznhc-health.log.status"
+      DCGMI_LOG="/var/log/dcgmi-diag.log.status"
+      HEALTH_STATUS_FILE="/var/log/node-health.log.status"
+      LOGFILE="/var/log/node-health.log"
+
+      log_message() {
+          echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >> "$LOGFILE"
+      }
+
+      aznhc_status="unknown"
+      dcgmi_status="unknown"
+      overall_health="unknown"
+
+      # Retrieve last status from logs
+      if [ -f "$AZNHC_LOG" ]; then
+          aznhc_status=$(tail -n 1 "$AZNHC_LOG" | awk '{print $2}')
+      fi
+
+      if [ -f "$DCGMI_LOG" ]; then
+          dcgmi_status=$(tail -n 1 "$DCGMI_LOG" | awk '{print $2}')
+      fi
+
+      # Determine overall health
+      if [ "$aznhc_status" = "passed" ] && [ "$dcgmi_status" = "passed" ]; then
+          overall_health="healthy"
+      elif [ "$aznhc_status" = "failed" ] || [ "$dcgmi_status" = "failed" ]; then
+          overall_health="unhealthy"
+      fi
+
+      # Write status to health status file
+      printf "%s %s\n" "$(date '+%Y-%m-%dT%H:%M:%S')" "$overall_health" >> "$HEALTH_STATUS_FILE"
+
+      log_message "Health check performed. AZNHC: $aznhc_status, DCGMI: $dcgmi_status, Overall: $overall_health"
+  # Single script to run health checks
+  - path: /opt/run-health-checks.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -eo pipefail
+
+      echo "$(date +%Y-%m-%dT%H:%M:%S) Running health checks"
+      /opt/run-aznhc.sh
+      /opt/run-dcgmi-diag.sh
+  # Disable strict host key checking for SSH on the cluster for ease of use
+  - path: /etc/ssh/ssh_config
+    content: |
+
+      Include /etc/ssh/ssh_config.d/*.conf
+      Host *
+        StrictHostKeyChecking no
+        UserKnownHostsFile=/dev/null
+        SendEnv LANG LC_*
+        HashKnownHosts yes
+        GSSAPIAuthentication yes
+    owner: root:root
+    permissions: '0644'
+  # Use VI mode for bash
+  - path: /etc/profile.d/set_vi_mode.sh
+    permissions: '0755'
+    content: |
+      set -o vi
+runcmd:
+  # Setup NVMe disks as RAID-0
+  - ["/bin/bash", "/opt/setup_nvme.sh"]
+  # Gather node information and save to /var/log/node-info.log which can be useful
+  - ["/bin/bash", "/opt/node-info.sh"]
+  # Add users to docker group - PAM method(s) not working so far
+  - bash -c 'for USER in $(ls /home); do usermod -aG docker $USER; done'
+  - systemctl restart docker
+  # Directories for Hugging Face cache and Docker
+  - mkdir -p /mnt/resource_nvme/docker
+  - mkdir -p /mnt/resource_nvme/hf_cache
+  - chmod 1777 /mnt/resource_nvme/docker
+  - chmod 1777 /mnt/resource_nvme/hf_cache
+  # Run health checks after NVMes are setup
+  - ["/bin/bash", "/opt/run-health-checks.sh"]
+bootcmd:
+  - nvidia-smi -pm 1
